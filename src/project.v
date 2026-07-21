@@ -73,7 +73,7 @@ module tt_um_Josue_Olivos_SAR_ADC (
      * ADC conversion rate.
      */
 
-    parameter integer CLK_FREQ_HZ = 60_000_000;
+    parameter integer CLK_FREQ_HZ = 50_000_000;
     parameter integer ADC_STEP_HZ = 100_000;
 
     localparam integer DIVIDER_MAX =
