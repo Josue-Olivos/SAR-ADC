@@ -5,7 +5,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-`timescale 1ns / 1ps
 `default_nettype none
 
 module tt_um_josue_olivos_sar_adc (
