@@ -8,7 +8,7 @@
 `timescale 1ns / 1ps
 `default_nettype none
 
-module tt_um_Josue_Olivos_SAR_ADC (
+module tt_um_josue_olivos_sar_adc (
     input  wire [7:0] ui_in,    // Dedicated inputs
     output wire [7:0] uo_out,   // Dedicated outputs
     input  wire [7:0] uio_in,   // Bidirectional input path
