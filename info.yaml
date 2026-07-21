@@ -1,29 +1,26 @@
 # Tiny Tapeout project information
 project:
-  title:        ""      # Project title
-  author:       ""      # Your name
-  discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  ""      # One line description of what your project does
-  language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
-  clock_hz:     0       # Clock frequency in Hz (or 0 if not applicable)
+  title:        "4-Bit Charge-Redistribution SAR ADC Controller"
+  author:       "Josue Olivos"
+  discord:      ""  # Add your Discord username if desired
+  description:  "Digital control logic for an external 4-bit charge-redistribution SAR ADC"
+  language:     "Verilog"
+  clock_hz:     50000000
 
-  # How many tiles your design occupies? A single tile is about 167x108 uM.
-  tiles: "1x1"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
+  # The SAR controller should fit within one Tiny Tapeout tile.
+  tiles: "1x1"
 
-  # Your top module name must start with "tt_um_". Make it unique by including your github username:
-  top_module:  "tt_um_example"
+  # This must exactly match the module name in src/project.v.
+  top_module: "tt_um_josue_olivos_sar_adc"
 
-  # List your project's source files here.
-  # Source files must be in ./src and you must list each source file separately, one per line.
-  # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
+  # Source files located in the src directory.
   source_files:
     - "project.v"
 
-# The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
-# This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
+# The pinout of your project. Leave unused pins blank.
 pinout:
-  # Inputs
-  ui[0]: ""
+  # Dedicated inputs
+  ui[0]: "Comparator output"
   ui[1]: ""
   ui[2]: ""
   ui[3]: ""
@@ -32,17 +29,17 @@ pinout:
   ui[6]: ""
   ui[7]: ""
 
-  # Outputs
-  uo[0]: ""
-  uo[1]: ""
-  uo[2]: ""
-  uo[3]: ""
-  uo[4]: ""
-  uo[5]: ""
-  uo[6]: ""
-  uo[7]: ""
+  # Dedicated outputs
+  uo[0]: "DAC bit 0 - LSB"
+  uo[1]: "DAC bit 1"
+  uo[2]: "DAC bit 2"
+  uo[3]: "DAC bit 3 - MSB"
+  uo[4]: "Sample switch control"
+  uo[5]: "FSM state bit 0"
+  uo[6]: "FSM state bit 1"
+  uo[7]: "FSM state bit 2"
 
-  # Bidirectional pins
+  # Bidirectional pins are unused and configured as inputs.
   uio[0]: ""
   uio[1]: ""
   uio[2]: ""
