@@ -1,4 +1,3 @@
-```python
 # SPDX-FileCopyrightText: © 2024 Tiny Tapeout
 # SPDX-License-Identifier: Apache-2.0
 
@@ -624,4 +623,3 @@ async def test_disabling_trojan_resets_sequence(dut):
         "External Trojan disable successfully restored "
         "and maintained clean operation"
     )
-```
