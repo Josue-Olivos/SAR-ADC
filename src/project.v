@@ -1,7 +1,6 @@
 /*
- * 4-bit SAR ADC Controller for Tiny Tapeout
+ * 4-bit SAR ADC Controller with Experimental Hardware Trojan
  *
- * Copyright (c) 2026 Josue Olivos
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,7 +12,7 @@ module tt_um_josue_olivos_sar_adc (
     input  wire [7:0] uio_in,   // Bidirectional input path
     output wire [7:0] uio_out,  // Bidirectional output path
     output wire [7:0] uio_oe,   // 0 = input, 1 = output
-    input  wire       ena,      // High while project is enabled
+    input  wire       ena,      // High while design is enabled
     input  wire       clk,      // Tiny Tapeout clock
     input  wire       rst_n     // Active-low reset
 );
@@ -23,40 +22,26 @@ module tt_um_josue_olivos_sar_adc (
     //============================================================
 
     /*
-     * Dedicated inputs:
+     * Inputs:
      *
-     * ui_in[0] = comparator output
-     * ui_in[7:1] = unused
+     * ui_in[0]  = external comparator output
+     * uio_in[0] = experimental Trojan enable
      *
-     * Dedicated outputs:
+     * Outputs:
      *
      * uo_out[0] = DAC bit 0, LSB
      * uo_out[1] = DAC bit 1
      * uo_out[2] = DAC bit 2
      * uo_out[3] = DAC bit 3, MSB
-     * uo_out[4] = sample switch control
-     * uo_out[7:5] = current FSM state for debugging
+     * uo_out[4] = sample-switch control
+     * uo_out[7:5] = current FSM state
      */
 
     wire comp_out;
+    wire trojan_enable;
 
-    reg        sample_sw;
-    reg [3:0]  dac;
-    reg [2:0]  state;
-
-    assign comp_out = ui_in[0];
-
-    assign uo_out[3:0] = dac;
-    assign uo_out[4]   = sample_sw;
-    assign uo_out[7:5] = state;
-
-    /*
-     * The bidirectional Tiny Tapeout pins are not currently used.
-     * Keep them configured as inputs.
-     */
-
-    assign uio_out = 8'b0000_0000;
-    assign uio_oe  = 8'b0000_0000;
+    assign comp_out      = ui_in[0];
+    assign trojan_enable = uio_in[0];
 
 
     //============================================================
@@ -64,12 +49,12 @@ module tt_um_josue_olivos_sar_adc (
     //============================================================
 
     /*
-     * These parameters assume that clk is running at 60 MHz.
+     * Tiny Tapeout project configuration:
      *
-     * The FSM advances at ADC_STEP_HZ.
+     * System clock:   50 MHz
+     * SAR state rate: 100 kHz
      *
-     * This is the state-machine step frequency, not the completed
-     * ADC conversion rate.
+     * The state machine advances once every 500 clock cycles.
      */
 
     parameter integer CLK_FREQ_HZ = 50_000_000;
@@ -87,10 +72,9 @@ module tt_um_josue_olivos_sar_adc (
             adc_tick      <= 1'b0;
         end
         else begin
-            // adc_tick normally remains low.
             adc_tick <= 1'b0;
 
-            if (divider_count >= DIVIDER_MAX) begin
+            if (divider_count == DIVIDER_MAX) begin
                 divider_count <= 32'd0;
                 adc_tick      <= 1'b1;
             end
@@ -106,11 +90,8 @@ module tt_um_josue_olivos_sar_adc (
     //============================================================
 
     /*
-     * The comparator is external to the Tiny Tapeout chip and is
-     * therefore asynchronous relative to clk.
-     *
-     * These two flip-flops reduce the risk of metastability before
-     * the comparator value is used by the SAR state machine.
+     * The external comparator is asynchronous relative to clk.
+     * Two flip-flops reduce the chance of metastability.
      */
 
     reg comp_meta;
@@ -129,7 +110,7 @@ module tt_um_josue_olivos_sar_adc (
 
 
     //============================================================
-    // SAR ADC CONTROL LOGIC
+    // SAR ADC STATE DEFINITIONS
     //============================================================
 
     localparam [2:0]
@@ -140,69 +121,165 @@ module tt_um_josue_olivos_sar_adc (
         READ_COMP = 3'd4,
         DONE      = 3'd5;
 
+    reg [2:0] state;
     reg [1:0] bit_index;
-
-    /*
-     * Set this parameter according to the polarity of the external
-     * comparator:
-     *
-     * 1:
-     *   Comparator high means the trial DAC bit should be kept.
-     *
-     * 0:
-     *   Comparator low means the trial DAC bit should be kept.
-     */
 
     parameter COMP_HIGH_MEANS_KEEP = 1'b1;
 
+
+    //============================================================
+    // INTERNAL SAR DAC REGISTER
+    //============================================================
+
+    /*
+     * sar_dac contains the internal SAR trial code.
+     *
+     * dac_out is the value that appears on the Tiny Tapeout
+     * output pins.
+     */
+
+    reg  [3:0] sar_dac;
+    wire [3:0] dac_out;
+
+
+    //============================================================
+    // EXPERIMENTAL TROJAN CONTROL
+    //============================================================
+
+    /*
+     * Counts completed conversions from 0 through 499.
+     *
+     * Nine bits can represent values from 0 through 511.
+     */
+
+    reg [8:0] trojan_conversion_count;
+
+    /*
+     * trojan_phase:
+     *
+     * 0 = normal DAC output
+     * 1 = inverted DAC output
+     */
+
+    reg trojan_phase;
+
+    /*
+     * When uio_in[0] is low:
+     *
+     *     The Trojan is disabled.
+     *     The counter is reset.
+     *     DAC outputs are normal.
+     *
+     * When uio_in[0] is high:
+     *
+     *     500 conversions use normal outputs.
+     *     500 conversions use inverted outputs.
+     *     The pattern repeats continuously.
+     */
+
+    assign dac_out =
+        (trojan_enable && trojan_phase)
+            ? ~sar_dac
+            : sar_dac;
+
+
+    //============================================================
+    // TINY TAPEOUT OUTPUTS
+    //============================================================
+
+    assign uo_out[3:0] = dac_out;
+    assign uo_out[4]   = sample_sw;
+    assign uo_out[7:5] = state;
+
+    /*
+     * All bidirectional pins remain configured as inputs.
+     *
+     * uio_in[0] is used as the Trojan-enable input.
+     */
+
+    assign uio_out = 8'b0000_0000;
+    assign uio_oe  = 8'b0000_0000;
+
+
+    //============================================================
+    // SAMPLE-SWITCH REGISTER
+    //============================================================
+
+    reg sample_sw;
+
+
+    //============================================================
+    // SAR ADC CONTROL LOGIC
+    //============================================================
+
     always @(posedge clk) begin
         if (!rst_n) begin
-            state     <= SAMPLE;
-            sample_sw <= 1'b1;
-            dac       <= 4'b0000;
-            bit_index <= 2'd3;
+            state                   <= SAMPLE;
+            sample_sw               <= 1'b1;
+            sar_dac                 <= 4'b0000;
+            bit_index               <= 2'd3;
+            trojan_conversion_count <= 9'd0;
+            trojan_phase            <= 1'b0;
         end
         else if (adc_tick) begin
             case (state)
 
-                // Connect the input signal to the capacitor DAC.
+                //================================================
+                // SAMPLE INPUT
+                //================================================
+
                 SAMPLE: begin
                     sample_sw <= 1'b1;
-                    dac       <= 4'b0000;
+                    sar_dac   <= 4'b0000;
                     bit_index <= 2'd3;
                     state     <= HOLD;
                 end
 
-                // Disconnect the input and hold the sampled voltage.
+
+                //================================================
+                // HOLD SAMPLED INPUT
+                //================================================
+
                 HOLD: begin
                     sample_sw <= 1'b0;
                     bit_index <= 2'd3;
                     state     <= SET_BIT;
                 end
 
-                // Set the current trial bit, beginning with the MSB.
+
+                //================================================
+                // SET CURRENT TRIAL BIT
+                //================================================
+
                 SET_BIT: begin
-                    dac[bit_index] <= 1'b1;
-                    state          <= WAIT_DAC;
+                    sar_dac[bit_index] <= 1'b1;
+                    state              <= WAIT_DAC;
                 end
 
-                // Give the external DAC and comparator time to settle.
+
+                //================================================
+                // WAIT FOR EXTERNAL DAC AND COMPARATOR
+                //================================================
+
                 WAIT_DAC: begin
                     state <= READ_COMP;
                 end
 
-                // Keep or clear the current trial bit.
+
+                //================================================
+                // READ COMPARATOR
+                //================================================
+
                 READ_COMP: begin
                     if (COMP_HIGH_MEANS_KEEP) begin
                         if (!comp_sync)
-                            dac[bit_index] <= 1'b0;
+                            sar_dac[bit_index] <= 1'b0;
                     end
                     else begin
                         if (comp_sync)
-                            dac[bit_index] <= 1'b0;
+                            sar_dac[bit_index] <= 1'b0;
                     end
 
-                    // After the LSB decision, conversion is complete.
                     if (bit_index == 2'd0) begin
                         state <= DONE;
                     end
@@ -212,18 +289,59 @@ module tt_um_josue_olivos_sar_adc (
                     end
                 end
 
-                // Preserve the completed ADC result for one FSM step.
+
+                //================================================
+                // CONVERSION COMPLETE
+                //================================================
+
                 DONE: begin
                     sample_sw <= 1'b1;
                     bit_index <= 2'd3;
                     state     <= SAMPLE;
+
+                    /*
+                     * Disabling the Trojan returns the controller
+                     * immediately to the normal phase and resets
+                     * the conversion counter.
+                     */
+
+                    if (!trojan_enable) begin
+                        trojan_conversion_count <= 9'd0;
+                        trojan_phase            <= 1'b0;
+                    end
+
+                    /*
+                     * Toggle the Trojan phase after every 500
+                     * completed conversions.
+                     */
+
+                    else if (trojan_conversion_count == 9'd499) begin
+                        trojan_conversion_count <= 9'd0;
+                        trojan_phase            <= ~trojan_phase;
+                    end
+
+                    /*
+                     * Count the completed conversion.
+                     */
+
+                    else begin
+                        trojan_conversion_count <=
+                            trojan_conversion_count + 1'b1;
+                    end
                 end
 
+
+                //================================================
+                // RECOVERY
+                //================================================
+
                 default: begin
-                    state     <= SAMPLE;
-                    sample_sw <= 1'b1;
-                    dac       <= 4'b0000;
-                    bit_index <= 2'd3;
+                    state                   <= SAMPLE;
+                    sample_sw               <= 1'b1;
+                    sar_dac                 <= 4'b0000;
+                    bit_index               <= 2'd3;
+                    trojan_conversion_count <= 9'd0;
+                    trojan_phase            <= 1'b0;
                 end
 
             endcase
@@ -235,14 +353,14 @@ module tt_um_josue_olivos_sar_adc (
     // UNUSED INPUTS
     //============================================================
 
-    /*
-     * Reference unused inputs so that lint and synthesis tools do
-     * not report unnecessary unused-signal warnings.
-     */
-
     wire _unused;
 
-    assign _unused = &{ena, ui_in[7:1], uio_in, 1'b0};
+    assign _unused = &{
+        ena,
+        ui_in[7:1],
+        uio_in[7:1],
+        1'b0
+    };
 
 endmodule
 
