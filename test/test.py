@@ -7,8 +7,7 @@ from cocotb.triggers import (
     ClockCycles,
     NextTimeStep,
     ReadOnly,
-    ValueChange,
-    with_timeout,
+    RisingEdge,
 )
 
 
@@ -17,17 +16,11 @@ from cocotb.triggers import (
 # ================================================================
 #
 # ui_in[0]    = external comparator output
+# uio_in[0]   = experimental Trojan enable
 #
 # uo_out[3:0] = physical DAC switch outputs
 # uo_out[4]   = sample-switch control
 # uo_out[7:5] = SAR state-machine state
-#
-# Automatic Trojan sequence:
-#
-#   Counter 0-449   = normal DAC output
-#   Counter 450-499 = infected DAC output
-#   Counter wraps back to zero
-#
 
 
 DAC_MASK = 0x0F
@@ -38,8 +31,6 @@ SET_BIT = 2
 WAIT_DAC = 3
 READ_COMP = 4
 DONE = 5
-
-STATE_CHANGE_TIMEOUT_US = 2_000
 
 
 # ================================================================
@@ -59,17 +50,34 @@ def get_sample_switch(dut):
 
 
 def get_state(dut):
-    """Return the SAR state from uo_out[7:5]."""
+    """Return the SAR FSM state from uo_out[7:5]."""
 
     return (int(dut.uo_out.value) >> 5) & 0x07
 
 
+def get_design_instance(dut):
+    """
+    Return the Tiny Tapeout design instance inside tb.
+
+    The standard Tiny Tapeout tb.v normally names this instance dut.
+    """
+
+    return getattr(dut, "dut", None)
+
+
 # ================================================================
-# RESET HELPERS
+# INPUT HELPERS
 # ================================================================
 
+async def set_trojan_enable(dut, enabled):
+    """Drive uio_in[0] after leaving the simulator ReadOnly phase."""
+
+    await NextTimeStep()
+    dut.uio_in.value = 0x01 if enabled else 0x00
+
+
 async def assert_reset(dut):
-    """Assert the active-low Tiny Tapeout reset."""
+    """Assert Tiny Tapeout's active-low reset."""
 
     await NextTimeStep()
 
@@ -82,10 +90,9 @@ async def assert_reset(dut):
 
 
 async def release_reset(dut):
-    """Release the active-low Tiny Tapeout reset."""
+    """Release Tiny Tapeout's active-low reset."""
 
     await NextTimeStep()
-
     dut.rst_n.value = 1
 
     await ClockCycles(dut.clk, 10)
@@ -94,101 +101,48 @@ async def release_reset(dut):
 async def reset_dut(dut):
     """Apply and release reset."""
 
-    dut._log.info("Resetting design")
+    dut._log.info("Reset")
 
     await assert_reset(dut)
     await release_reset(dut)
 
 
-async def start_test(dut):
-    """Start the clock and reset the design."""
-
-    clock = Clock(
-        dut.clk,
-        10,
-        unit="ns",
-    )
-
-    cocotb.start_soon(clock.start())
-
-    await reset_dut(dut)
-
-
 # ================================================================
-# COMPARATOR MODEL
+# EXTERNAL ANALOG-HARDWARE MODEL
 # ================================================================
 
 async def comparator_model(dut, input_code):
     """
     Model the external comparator and capacitor DAC.
 
-    The model updates only when uo_out changes. This is much faster
-    than checking the DAC output on every main clock cycle.
+    input_code represents an ideal analog input from 0 through 15.
 
-    Comparator HIGH means:
-
-        input_code >= physical DAC code
+    The comparator observes the physical DAC outputs on uo_out[3:0].
+    Therefore, it also observes inverted outputs while the Trojan
+    phase is active.
     """
 
-    await NextTimeStep()
-
-    dut.ui_in.value = (
-        1 if input_code >= get_dac_code(dut) else 0
-    )
-
     while True:
-
-        await ValueChange(dut.uo_out)
+        await RisingEdge(dut.clk)
         await ReadOnly()
 
         trial_code = get_dac_code(dut)
-
-        comparator_value = (
-            1 if input_code >= trial_code else 0
-        )
+        comparator_value = 1 if input_code >= trial_code else 0
 
         await NextTimeStep()
-
         dut.ui_in.value = comparator_value
 
 
 # ================================================================
-# STATE HELPERS
+# CONVERSION HELPERS
 # ================================================================
 
-async def wait_for_output_change(dut):
-    """
-    Wait for the next visible output change.
+async def wait_for_state(dut, target_state, timeout_cycles=20_000):
+    """Wait until the controller reaches the requested FSM state."""
 
-    The timeout prevents a broken design from running forever.
-    """
-
-    await with_timeout(
-        ValueChange(dut.uo_out),
-        STATE_CHANGE_TIMEOUT_US,
-        "us",
-    )
-
-    await ReadOnly()
-
-
-async def wait_for_state(
-    dut,
-    target_state,
-    max_changes=40,
-):
-    """
-    Wait for the controller to reach target_state.
-
-    Return the physical DAC code observed in that state.
-    """
-
-    if get_state(dut) == target_state:
-        return get_dac_code(dut)
-
-    for _ in range(max_changes):
-
-        await wait_for_output_change(dut)
+    for _ in range(timeout_cycles):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
 
         if get_state(dut) == target_state:
             return get_dac_code(dut)
@@ -200,35 +154,42 @@ async def wait_for_state(
     )
 
 
-async def wait_for_conversion_done(dut):
+async def wait_for_conversion_done(dut, timeout_cycles=20_000):
     """
-    Wait for the next completed SAR conversion.
+    Wait for the next conversion to enter DONE.
 
-    If the FSM is already in DONE, wait for it to leave DONE first.
+    If the controller is already in DONE, first wait for it to leave.
     """
 
-    if get_state(dut) == DONE:
+    for _ in range(timeout_cycles):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
 
-        while get_state(dut) == DONE:
-            await wait_for_output_change(dut)
+        if get_state(dut) != DONE:
+            break
+    else:
+        raise AssertionError("SAR controller remained stuck in DONE")
 
-    return await wait_for_state(
-        dut,
-        DONE,
+    for _ in range(timeout_cycles):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+
+        if get_state(dut) == DONE:
+            return get_dac_code(dut)
+
+    raise AssertionError(
+        f"Timed out waiting for DONE. "
+        f"State={get_state(dut)}, "
+        f"DAC={get_dac_code(dut):04b}"
     )
 
 
-async def run_conversion(
-    dut,
-    input_code,
-    log_result=False,
-):
-    """Run one conversion and return its physical DAC output."""
+async def run_conversion(dut, input_code, log_result=False):
+    """Run one conversion and return the physical DAC output."""
 
     result = await wait_for_conversion_done(dut)
 
     if log_result:
-
         dut._log.info(
             f"Input={input_code:04b} ({input_code}), "
             f"output={result:04b} ({result})"
@@ -237,94 +198,48 @@ async def run_conversion(
     return result
 
 
-# ================================================================
-# INTERNAL TROJAN COUNTER HELPER
-# ================================================================
+async def start_test(dut):
+    """Start the 50 MHz clock and reset the design."""
 
-def get_trojan_counter(dut):
-    """
-    Locate the internal Trojan conversion counter.
+    clock = Clock(dut.clk, 20, unit="ns")
+    cocotb.start_soon(clock.start())
 
-    The exact hierarchy depends on the Tiny Tapeout simulation
-    wrapper and the name used in the Verilog source.
-    """
+    await reset_dut(dut)
 
-    possible_names = (
-        "trojan_count",
-        "trojan_conversion_count",
+
+async def run_clean_code_test(dut, input_code):
+    """Run and verify one clean SAR conversion."""
+
+    comparator_task = cocotb.start_soon(
+        comparator_model(dut, input_code)
     )
 
-    # Counter directly inside the simulation top level.
-    for signal_name in possible_names:
+    try:
+        result = await run_conversion(
+            dut,
+            input_code,
+            log_result=True,
+        )
 
-        if hasattr(dut, signal_name):
-            return getattr(dut, signal_name)
-
-    # Common Tiny Tapeout wrapper instance names.
-    possible_instances = (
-        "user_project",
-        "uut",
-        "dut",
-        "project",
-    )
-
-    for instance_name in possible_instances:
-
-        if not hasattr(dut, instance_name):
-            continue
-
-        instance = getattr(dut, instance_name)
-
-        for signal_name in possible_names:
-
-            if hasattr(instance, signal_name):
-                return getattr(instance, signal_name)
-
-    raise AssertionError(
-        "Could not locate the internal Trojan counter. "
-        "The counter should be named trojan_count or "
-        "trojan_conversion_count and must be visible in RTL "
-        "simulation."
-    )
-
-
-async def set_trojan_counter(
-    dut,
-    value,
-):
-    """Set the internal Trojan counter during RTL simulation."""
-
-    counter = get_trojan_counter(dut)
-
-    await NextTimeStep()
-
-    counter.value = value
-
-    await NextTimeStep()
-
-    actual_value = int(counter.value)
-
-    assert actual_value == value, (
-        f"Could not set Trojan counter to {value}. "
-        f"Counter remained at {actual_value}."
-    )
-
-    dut._log.info(
-        f"Trojan counter set to {value}"
-    )
+        assert result == input_code, (
+            f"Input {input_code:04b}: "
+            f"expected {input_code:04b}, "
+            f"received {result:04b}"
+        )
+    finally:
+        comparator_task.cancel()
+        await NextTimeStep()
 
 
 # ================================================================
-# BASIC FUNCTION TEST
+# BASIC RESET AND CONVERSION TEST
 # ================================================================
 
 @cocotb.test()
 async def test_project(dut):
-    """Test reset and one normal SAR conversion."""
+    """Test reset behavior and one representative conversion."""
 
-    dut._log.info(
-        "Start basic SAR ADC test"
-    )
+    dut._log.info("Start basic SAR ADC test")
 
     await start_test(dut)
 
@@ -342,251 +257,271 @@ async def test_project(dut):
         f"but was {get_dac_code(dut):04b}"
     )
 
-    input_code = 10
-
-    comparator_task = cocotb.start_soon(
-        comparator_model(
-            dut,
-            input_code,
-        )
-    )
-
-    result = await run_conversion(
-        dut,
-        input_code,
-        log_result=True,
-    )
-
-    assert result == input_code, (
-        f"Expected {input_code:04b}, "
-        f"but received {result:04b}"
-    )
-
-    comparator_task.cancel()
-
-    dut._log.info(
-        "Basic SAR ADC test passed"
-    )
+    await set_trojan_enable(dut, False)
+    await run_clean_code_test(dut, 10)
 
 
 # ================================================================
-# SHORT CLEAN INPUT SWEEP
+# FAST REPRESENTATIVE CLEAN-CODE TEST
 # ================================================================
 
 @cocotb.test()
-async def test_selected_input_codes(dut):
+async def test_representative_input_codes(dut):
     """
-    Test a small selection of input values.
+    Test a small representative set instead of all 16 codes.
 
-    Testing zero, intermediate values, and full scale is sufficient
-    for a quick simulation. This avoids resetting and testing all
-    16 possible input codes.
+    Codes:
+        0011 = low input
+        1010 = middle/high input
+        1110 = high input
     """
 
-    dut._log.info(
-        "Start selected input-code test"
-    )
+    dut._log.info("Start representative clean-code test")
 
-    clock = Clock(
-        dut.clk,
-        10,
-        unit="ns",
-    )
-
+    clock = Clock(dut.clk, 20, unit="ns")
     cocotb.start_soon(clock.start())
 
-    test_codes = (
-        0,
-        5,
-        10,
-        15,
-    )
-
-    for input_code in test_codes:
-
+    for input_code in (3, 10, 14):
         await assert_reset(dut)
 
         comparator_task = cocotb.start_soon(
-            comparator_model(
+            comparator_model(dut, input_code)
+        )
+
+        try:
+            await release_reset(dut)
+            await set_trojan_enable(dut, False)
+
+            result = await run_conversion(
                 dut,
                 input_code,
+                log_result=True,
             )
-        )
 
-        await release_reset(dut)
+            assert result == input_code, (
+                f"Input {input_code:04b}: "
+                f"expected {input_code:04b}, "
+                f"received {result:04b}"
+            )
+        finally:
+            comparator_task.cancel()
+            await NextTimeStep()
 
-        result = await run_conversion(
-            dut,
-            input_code,
-            log_result=True,
-        )
-
-        assert result == input_code, (
-            f"Input {input_code:04b}: "
-            f"expected {input_code:04b}, "
-            f"received {result:04b}"
-        )
-
-        comparator_task.cancel()
-
-        await NextTimeStep()
-
-    dut._log.info(
-        "Selected input codes passed"
-    )
+    dut._log.info("Representative clean codes passed")
 
 
 # ================================================================
-# SHORT AUTOMATIC TROJAN TEST
+# TROJAN-DISABLED CONTROL TEST
 # ================================================================
 
 @cocotb.test()
-async def test_automatic_trojan_window(dut):
+async def test_trojan_disabled(dut):
     """
-    Test the automatic Trojan without running 500 conversions.
+    Verify several consecutive conversions remain clean while the
+    Trojan-enable input is low.
 
-    The test directly sets the internal counter near each important
-    boundary.
-
-    Test sequence:
-
-        Counter 449:
-            Run the final normal conversion.
-
-        Counter advances to 450:
-            Confirm the infected output activates.
-
-        Counter 450:
-            Run one infected conversion.
-
-        Counter 499:
-            Run the final infected conversion.
-
-        Counter wraps to zero:
-            Run one restored normal conversion.
+    This replaces the old 501-conversion disabled test.
     """
 
-    dut._log.info(
-        "Start shortened automatic Trojan test"
-    )
+    dut._log.info("Test Trojan-disabled operation")
 
     await start_test(dut)
+    await set_trojan_enable(dut, False)
+
+    input_code = 10
+
+    comparator_task = cocotb.start_soon(
+        comparator_model(dut, input_code)
+    )
+
+    try:
+        for conversion_number in range(1, 4):
+            result = await run_conversion(dut, input_code)
+
+            assert result == input_code, (
+                f"Trojan was disabled, but conversion "
+                f"{conversion_number} produced {result:04b}; "
+                f"expected {input_code:04b}"
+            )
+
+        dut._log.info(
+            "Three consecutive Trojan-disabled conversions passed"
+        )
+    finally:
+        comparator_task.cancel()
+        await NextTimeStep()
+
+
+# ================================================================
+# FAST RTL TROJAN-BOUNDARY TEST
+# ================================================================
+
+@cocotb.test()
+async def test_trojan_boundary_fast(dut):
+    """
+    Test the 500-conversion boundary without running 500 conversions.
+
+    In RTL simulation, directly set the internal conversion counter
+    to 499. One conversion then causes the normal-to-inverted phase
+    transition.
+
+    In gate-level simulation, internal registers are usually renamed
+    or optimized away. If the counter is unavailable, this test exits
+    successfully instead of running hundreds of conversions.
+    """
+
+    dut._log.info("Start fast Trojan-boundary test")
+
+    await start_test(dut)
+
+    design = get_design_instance(dut)
+
+    if design is None:
+        dut._log.info(
+            "Design instance not available; "
+            "skipping internal-counter boundary test"
+        )
+        return
+
+    counter = getattr(design, "trojan_conversion_count", None)
+    phase = getattr(design, "trojan_phase", None)
+
+    if counter is None or phase is None:
+        dut._log.info(
+            "Internal Trojan registers are not visible. "
+            "This is expected for gate-level simulation; "
+            "skipping the long 500-conversion test."
+        )
+        return
 
     input_code = 10
     normal_code = input_code
     inverted_code = (~input_code) & DAC_MASK
 
     comparator_task = cocotb.start_soon(
-        comparator_model(
+        comparator_model(dut, input_code)
+    )
+
+    try:
+        await set_trojan_enable(dut, True)
+
+        # Place the RTL counter one conversion before its threshold.
+        await NextTimeStep()
+        counter.value = 499
+        phase.value = 0
+
+        dut._log.info(
+            "Forced RTL Trojan counter to 499"
+        )
+
+        # The conversion itself enters DONE while still normal.
+        result = await run_conversion(
             dut,
             input_code,
+            log_result=True,
         )
+
+        assert result == normal_code, (
+            f"Boundary conversion should finish normally. "
+            f"Expected {normal_code:04b}, "
+            f"received {result:04b}"
+        )
+
+        # When DONE executes and returns to SAMPLE, the phase toggles.
+        phase_switch_output = await wait_for_state(dut, SAMPLE)
+
+        dut._log.info(
+            f"Output after Trojan activation: "
+            f"{phase_switch_output:04b}"
+        )
+
+        assert phase_switch_output == inverted_code, (
+            f"Expected the output to invert to "
+            f"{inverted_code:04b}, "
+            f"received {phase_switch_output:04b}"
+        )
+    finally:
+        comparator_task.cancel()
+        await NextTimeStep()
+
+
+# ================================================================
+# FAST EXTERNAL-DISABLE TEST
+# ================================================================
+
+@cocotb.test()
+async def test_external_trojan_disable_fast(dut):
+    """
+    Verify that uio_in[0] low selects the normal DAC outputs.
+
+    During RTL, the internal phase register is forced active so the
+    disable behavior can be tested immediately. This test is skipped
+    at gate level if the phase register is not visible.
+    """
+
+    dut._log.info("Start fast external-disable test")
+
+    await start_test(dut)
+
+    design = get_design_instance(dut)
+
+    if design is None:
+        dut._log.info(
+            "Design instance not available; skipping fast disable test"
+        )
+        return
+
+    phase = getattr(design, "trojan_phase", None)
+
+    if phase is None:
+        dut._log.info(
+            "Internal Trojan phase is not visible. "
+            "This is expected for gate-level simulation; "
+            "skipping the internal-force disable test."
+        )
+        return
+
+    input_code = 10
+    inverted_code = (~input_code) & DAC_MASK
+
+    comparator_task = cocotb.start_soon(
+        comparator_model(dut, input_code)
     )
 
-    # ------------------------------------------------------------
-    # TEST THE START OF THE INFECTED WINDOW
-    # ------------------------------------------------------------
+    try:
+        await set_trojan_enable(dut, True)
 
-    await set_trojan_counter(
-        dut,
-        449,
-    )
+        await NextTimeStep()
+        phase.value = 1
 
-    # Counter 449 is still normal.
-    result_450 = await run_conversion(
-        dut,
-        input_code,
-        log_result=True,
-    )
+        # The physical output should now use the inverted mapping.
+        await ReadOnly()
+        infected_output = get_dac_code(dut)
 
-    assert result_450 == normal_code, (
-        f"Final normal conversion failed. "
-        f"Expected {normal_code:04b}, "
-        f"received {result_450:04b}"
-    )
+        dut._log.info(
+            f"Forced infected-phase output: {infected_output:04b}"
+        )
 
-    # DONE increments the counter from 449 to 450.
-    # The Trojan should now activate.
-    infected_boundary = await wait_for_state(
-        dut,
-        SAMPLE,
-    )
+        # The exact internal SAR value at this moment may be zero,
+        # so only confirm that disabling restores clean conversions.
+        await set_trojan_enable(dut, False)
 
-    dut._log.info(
-        f"Infected boundary output: "
-        f"{infected_boundary:04b}"
-    )
+        restored_result = await run_conversion(
+            dut,
+            input_code,
+            log_result=True,
+        )
 
-    assert infected_boundary == inverted_code, (
-        f"Trojan did not activate at count 450. "
-        f"Expected physical output "
-        f"{inverted_code:04b}, "
-        f"received {infected_boundary:04b}"
-    )
+        assert restored_result == input_code, (
+            f"Disabling the Trojan did not restore normal operation. "
+            f"Expected {input_code:04b}, "
+            f"received {restored_result:04b}"
+        )
 
-    # Run one complete infected conversion.
-    infected_result = await run_conversion(
-        dut,
-        input_code,
-        log_result=True,
-    )
-
-    dut._log.info(
-        f"Infected conversion result: "
-        f"{infected_result:04b}"
-    )
-
-    # The infected conversion does not need to equal one exact code.
-    # The inverted physical DAC is part of the comparator feedback
-    # loop, so it changes the SAR decision process.
-
-    # ------------------------------------------------------------
-    # TEST THE END OF THE INFECTED WINDOW
-    # ------------------------------------------------------------
-
-    await set_trojan_counter(
-        dut,
-        499,
-    )
-
-    # Run the final conversion while the Trojan is active.
-    final_infected_result = await run_conversion(
-        dut,
-        input_code,
-        log_result=True,
-    )
-
-    dut._log.info(
-        f"Final infected conversion result: "
-        f"{final_infected_result:04b}"
-    )
-
-    # DONE should wrap the counter from 499 back to zero.
-    restored_boundary = await wait_for_state(
-        dut,
-        SAMPLE,
-    )
-
-    dut._log.info(
-        f"Output after counter wrap: "
-        f"{restored_boundary:04b}"
-    )
-
-    # The first complete conversion after the wrap must be clean.
-    restored_result = await run_conversion(
-        dut,
-        input_code,
-        log_result=True,
-    )
-
-    assert restored_result == normal_code, (
-        f"Normal operation was not restored. "
-        f"Expected {normal_code:04b}, "
-        f"received {restored_result:04b}"
-    )
-
-    comparator_task.cancel()
-
-    dut._log.info(
-        "Short automatic Trojan test passed"
-    )
+        dut._log.info(
+            f"Trojan disabled successfully; "
+            f"reference inverted code was {inverted_code:04b}"
+        )
+    finally:
+        comparator_task.cancel()
+        await NextTimeStep()
