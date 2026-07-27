@@ -17,7 +17,7 @@ project:
   source_files:
     - "project.v"
     - "sar_adc_clean.v"
-    - "sar_adc_manual.v"
+    - "sar_adc_manual_trojan.v"
     - "sar_adc_auto_trojan.v"
 
 # The pinout of your project. Leave unused pins blank.
