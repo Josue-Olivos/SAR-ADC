@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 `default_nettype none
 
-module sar_adc_manual_trojan (
+module sar_adc_manual (
 
     input  wire       clk,
     input  wire       rst_n,
