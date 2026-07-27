@@ -1,75 +1,68 @@
-/*
- * 4-bit SAR ADC Controller for Tiny Tapeout
- *
- * Copyright (c) 2026 Josue Olivos
- * SPDX-License-Identifier: Apache-2.0
- */
-
+`timescale 1ns / 1ps
 `default_nettype none
 
 module tt_um_josue_olivos_sar_adc (
-    input  wire [7:0] ui_in,    // Dedicated inputs
-    output wire [7:0] uo_out,   // Dedicated outputs
-    input  wire [7:0] uio_in,   // Bidirectional input path
-    output wire [7:0] uio_out,  // Bidirectional output path
-    output wire [7:0] uio_oe,   // 0 = input, 1 = output
-    input  wire       ena,      // High while project is enabled
-    input  wire       clk,      // Tiny Tapeout clock
-    input  wire       rst_n     // Active-low reset
+
+    input  wire [7:0] ui_in,
+    output wire [7:0] uo_out,
+
+    input  wire [7:0] uio_in,
+    output wire [7:0] uio_out,
+    output wire [7:0] uio_oe,
+
+    input  wire       ena,
+    input  wire       clk,
+    input  wire       rst_n
 );
+
 
     //============================================================
     // TINY TAPEOUT PIN MAPPING
     //============================================================
+    //
+    // ui_in[0]:
+    //     External comparator output
+    //
+    // uio_in[1:0]:
+    //     00 = clean SAR ADC
+    //     01 = manually enabled Trojan SAR ADC
+    //     10 = automatically triggered Trojan SAR ADC
+    //     11 = clean SAR ADC
+    //
+    // uio_in[2]:
+    //     Manual Trojan enable
+    //
+    // uo_out[3:0]:
+    //     Selected physical DAC output
+    //
+    // uo_out[4]:
+    //     Selected sample-switch output
+    //
+    // uo_out[7:5]:
+    //     Selected SAR state
 
-    /*
-     * Dedicated inputs:
-     *
-     * ui_in[0] = comparator output
-     * ui_in[7:1] = unused
-     *
-     * Dedicated outputs:
-     *
-     * uo_out[0] = DAC bit 0, LSB
-     * uo_out[1] = DAC bit 1
-     * uo_out[2] = DAC bit 2
-     * uo_out[3] = DAC bit 3, MSB
-     * uo_out[4] = sample switch control
-     * uo_out[7:5] = current FSM state for debugging
-     */
 
-    wire comp_out;
+    wire       comp_out;
+    wire [1:0] design_select;
+    wire       manual_trojan_enable;
 
-    reg        sample_sw;
-    reg [3:0]  dac;
-    reg [2:0]  state;
-
-    assign comp_out = ui_in[0];
-
-    assign uo_out[3:0] = dac;
-    assign uo_out[4]   = sample_sw;
-    assign uo_out[7:5] = state;
-
-    /*
-     * The bidirectional Tiny Tapeout pins are not currently used.
-     * Keep them configured as inputs.
-     */
-
-    assign uio_out = 8'b0000_0000;
-    assign uio_oe  = 8'b0000_0000;
+    assign comp_out             = ui_in[0];
+    assign design_select        = uio_in[1:0];
+    assign manual_trojan_enable = uio_in[2];
 
 
     //============================================================
-    // CLOCK DIVIDER
+    // SHARED CLOCK DIVIDER
     //============================================================
 
     /*
-     * These parameters assume that clk is running at 60 MHz.
+     * Tiny Tapeout simulation and configuration commonly use a
+     * 50 MHz clock:
      *
-     * The FSM advances at ADC_STEP_HZ.
+     *     CLOCK_PERIOD = 20 ns
      *
-     * This is the state-machine step frequency, not the completed
-     * ADC conversion rate.
+     * ADC_STEP_HZ determines how often the SAR state machine moves
+     * to its next state.
      */
 
     parameter integer CLK_FREQ_HZ = 50_000_000;
@@ -87,10 +80,9 @@ module tt_um_josue_olivos_sar_adc (
             adc_tick      <= 1'b0;
         end
         else begin
-            // adc_tick normally remains low.
             adc_tick <= 1'b0;
 
-            if (divider_count >= DIVIDER_MAX) begin
+            if (divider_count == DIVIDER_MAX) begin
                 divider_count <= 32'd0;
                 adc_tick      <= 1'b1;
             end
@@ -102,15 +94,15 @@ module tt_um_josue_olivos_sar_adc (
 
 
     //============================================================
-    // COMPARATOR SYNCHRONIZER
+    // SHARED COMPARATOR SYNCHRONIZER
     //============================================================
 
     /*
-     * The comparator is external to the Tiny Tapeout chip and is
-     * therefore asynchronous relative to clk.
+     * The external comparator output is asynchronous relative to
+     * the Tiny Tapeout clock.
      *
-     * These two flip-flops reduce the risk of metastability before
-     * the comparator value is used by the SAR state machine.
+     * Two flip-flops reduce the possibility of metastability
+     * reaching the SAR controllers.
      */
 
     reg comp_meta;
@@ -129,120 +121,233 @@ module tt_um_josue_olivos_sar_adc (
 
 
     //============================================================
-    // SAR ADC CONTROL LOGIC
+    // DESIGN SELECTION
     //============================================================
 
-    localparam [2:0]
-        SAMPLE    = 3'd0,
-        HOLD      = 3'd1,
-        SET_BIT   = 3'd2,
-        WAIT_DAC  = 3'd3,
-        READ_COMP = 3'd4,
-        DONE      = 3'd5;
-
-    reg [1:0] bit_index;
+    wire clean_selected;
+    wire manual_selected;
+    wire auto_selected;
 
     /*
-     * Set this parameter according to the polarity of the external
-     * comparator:
-     *
-     * 1:
-     *   Comparator high means the trial DAC bit should be kept.
-     *
-     * 0:
-     *   Comparator low means the trial DAC bit should be kept.
+     * Selector 11 defaults to the clean design.
      */
 
-    parameter COMP_HIGH_MEANS_KEEP = 1'b1;
+    assign clean_selected =
+        (design_select == 2'b00) ||
+        (design_select == 2'b11);
 
-    always @(posedge clk) begin
-        if (!rst_n) begin
-            state     <= SAMPLE;
-            sample_sw <= 1'b1;
-            dac       <= 4'b0000;
-            bit_index <= 2'd3;
-        end
-        else if (adc_tick) begin
-            case (state)
+    assign manual_selected =
+        (design_select == 2'b01);
 
-                // Connect the input signal to the capacitor DAC.
-                SAMPLE: begin
-                    sample_sw <= 1'b1;
-                    dac       <= 4'b0000;
-                    bit_index <= 2'd3;
-                    state     <= HOLD;
-                end
+    assign auto_selected =
+        (design_select == 2'b10);
 
-                // Disconnect the input and hold the sampled voltage.
-                HOLD: begin
-                    sample_sw <= 1'b0;
-                    bit_index <= 2'd3;
-                    state     <= SET_BIT;
-                end
 
-                // Set the current trial bit, beginning with the MSB.
-                SET_BIT: begin
-                    dac[bit_index] <= 1'b1;
-                    state          <= WAIT_DAC;
-                end
+    //============================================================
+    // INDIVIDUAL ADC TICKS
+    //============================================================
 
-                // Give the external DAC and comparator time to settle.
-                WAIT_DAC: begin
-                    state <= READ_COMP;
-                end
+    /*
+     * Only the selected SAR controller receives adc_tick.
+     *
+     * This is important because the comparator responds only to
+     * the DAC code that is physically selected at uo_out.
+     */
 
-                // Keep or clear the current trial bit.
-                READ_COMP: begin
-                    if (COMP_HIGH_MEANS_KEEP) begin
-                        if (!comp_sync)
-                            dac[bit_index] <= 1'b0;
-                    end
-                    else begin
-                        if (comp_sync)
-                            dac[bit_index] <= 1'b0;
-                    end
+    wire clean_tick;
+    wire manual_tick;
+    wire auto_tick;
 
-                    // After the LSB decision, conversion is complete.
-                    if (bit_index == 2'd0) begin
-                        state <= DONE;
-                    end
-                    else begin
-                        bit_index <= bit_index - 1'b1;
-                        state     <= SET_BIT;
-                    end
-                end
+    assign clean_tick =
+        adc_tick && clean_selected;
 
-                // Preserve the completed ADC result for one FSM step.
-                DONE: begin
-                    sample_sw <= 1'b1;
-                    bit_index <= 2'd3;
-                    state     <= SAMPLE;
-                end
+    assign manual_tick =
+        adc_tick && manual_selected;
 
-                default: begin
-                    state     <= SAMPLE;
-                    sample_sw <= 1'b1;
-                    dac       <= 4'b0000;
-                    bit_index <= 2'd3;
-                end
+    assign auto_tick =
+        adc_tick && auto_selected;
 
-            endcase
-        end
+
+    //============================================================
+    // INDIVIDUAL CONTROLLER RESETS
+    //============================================================
+
+    /*
+     * Unselected designs are held in reset.
+     *
+     * When a design becomes selected, it starts from the SAMPLE
+     * state rather than resuming in the middle of a conversion.
+     */
+
+    wire clean_rst_n;
+    wire manual_rst_n;
+    wire auto_rst_n;
+
+    assign clean_rst_n =
+        rst_n && clean_selected;
+
+    assign manual_rst_n =
+        rst_n && manual_selected;
+
+    assign auto_rst_n =
+        rst_n && auto_selected;
+
+
+    //============================================================
+    // CLEAN SAR ADC INSTANCE
+    //============================================================
+
+    wire [3:0] clean_dac;
+    wire       clean_sample_sw;
+    wire [2:0] clean_state;
+
+    sar_adc_clean clean_controller (
+
+        .clk       (clk),
+        .rst_n     (clean_rst_n),
+
+        .adc_tick  (clean_tick),
+        .comp_sync (comp_sync),
+
+        .sample_sw (clean_sample_sw),
+        .dac       (clean_dac),
+        .state_out (clean_state)
+    );
+
+
+    //============================================================
+    // MANUAL-TROJAN SAR ADC INSTANCE
+    //============================================================
+
+    wire [3:0] manual_dac;
+    wire       manual_sample_sw;
+    wire [2:0] manual_state;
+
+    sar_adc_manual_trojan manual_controller (
+
+        .clk           (clk),
+        .rst_n         (manual_rst_n),
+
+        .adc_tick      (manual_tick),
+        .comp_sync     (comp_sync),
+
+        .trojan_enable (manual_trojan_enable),
+
+        .sample_sw     (manual_sample_sw),
+        .dac           (manual_dac),
+        .state_out     (manual_state)
+    );
+
+
+    //============================================================
+    // AUTOMATIC-TROJAN SAR ADC INSTANCE
+    //============================================================
+
+    wire [3:0] auto_dac;
+    wire       auto_sample_sw;
+    wire [2:0] auto_state;
+
+    sar_adc_auto_trojan auto_controller (
+
+        .clk       (clk),
+        .rst_n     (auto_rst_n),
+
+        .adc_tick  (auto_tick),
+        .comp_sync (comp_sync),
+
+        .sample_sw (auto_sample_sw),
+        .dac       (auto_dac),
+        .state_out (auto_state)
+    );
+
+
+    //============================================================
+    // OUTPUT MULTIPLEXER
+    //============================================================
+
+    reg [3:0] selected_dac;
+    reg       selected_sample_sw;
+    reg [2:0] selected_state;
+
+    always @(*) begin
+
+        /*
+         * Default values prevent unintended latch inference.
+         */
+
+        selected_dac       = clean_dac;
+        selected_sample_sw = clean_sample_sw;
+        selected_state     = clean_state;
+
+        case (design_select)
+
+            // Clean SAR ADC
+            2'b00: begin
+                selected_dac       = clean_dac;
+                selected_sample_sw = clean_sample_sw;
+                selected_state     = clean_state;
+            end
+
+            // Manually enabled Trojan
+            2'b01: begin
+                selected_dac       = manual_dac;
+                selected_sample_sw = manual_sample_sw;
+                selected_state     = manual_state;
+            end
+
+            // Automatically triggered Trojan
+            2'b10: begin
+                selected_dac       = auto_dac;
+                selected_sample_sw = auto_sample_sw;
+                selected_state     = auto_state;
+            end
+
+            // Reserved selector defaults to clean
+            default: begin
+                selected_dac       = clean_dac;
+                selected_sample_sw = clean_sample_sw;
+                selected_state     = clean_state;
+            end
+
+        endcase
     end
 
 
     //============================================================
-    // UNUSED INPUTS
+    // DEDICATED OUTPUT MAPPING
+    //============================================================
+
+    assign uo_out[3:0] = selected_dac;
+    assign uo_out[4]   = selected_sample_sw;
+    assign uo_out[7:5] = selected_state;
+
+
+    //============================================================
+    // BIDIRECTIONAL PIN CONFIGURATION
     //============================================================
 
     /*
-     * Reference unused inputs so that lint and synthesis tools do
-     * not report unnecessary unused-signal warnings.
+     * All eight bidirectional pins are configured as inputs.
+     *
+     * Only uio_in[2:0] are currently used.
      */
+
+    assign uio_out = 8'b00000000;
+    assign uio_oe  = 8'b00000000;
+
+
+    //============================================================
+    // UNUSED INPUT HANDLING
+    //============================================================
 
     wire _unused;
 
-    assign _unused = &{ena, ui_in[7:1], uio_in, 1'b0};
+    assign _unused = &{
+        ena,
+        ui_in[7:1],
+        uio_in[7:3],
+        1'b0
+    };
 
 endmodule
 
