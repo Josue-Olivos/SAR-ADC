@@ -3,14 +3,33 @@
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, RisingEdge
+from cocotb.triggers import (
+    ClockCycles,
+    NextTimeStep,
+    ReadOnly,
+    ValueChange,
+    with_timeout,
+)
 
 
-# Tiny Tapeout output mapping:
+# ================================================================
+# TINY TAPEOUT PIN MAPPING
+# ================================================================
 #
-# uo_out[3:0] = 4-bit SAR DAC result
-# uo_out[4]   = sample switch
-# uo_out[7:5] = FSM state
+# ui_in[0]    = comparator output
+#
+# uio_in[1:0] = design selector
+#               00 = clean
+#               01 = manual Trojan
+#               10 = automatic Trojan
+#               11 = clean/default
+#
+# uio_in[2]   = manual Trojan enable
+#
+# uo_out[3:0] = selected DAC output
+# uo_out[4]   = selected sample switch
+# uo_out[7:5] = selected FSM state
+
 
 DAC_MASK = 0x0F
 
@@ -21,197 +40,327 @@ WAIT_DAC = 3
 READ_COMP = 4
 DONE = 5
 
+CLEAN_SELECT = 0b00
+MANUAL_SELECT = 0b01
+AUTO_SELECT = 0b10
+DEFAULT_SELECT = 0b11
+
+OUTPUT_TIMEOUT_US = 2_000
+
+
+# ================================================================
+# OUTPUT HELPERS
+# ================================================================
 
 def get_dac_code(dut):
-    """Return the 4-bit DAC value from uo_out[3:0]."""
+    """Return uo_out[3:0]."""
+
     return int(dut.uo_out.value) & DAC_MASK
 
 
 def get_sample_switch(dut):
-    """Return the sample-switch output from uo_out[4]."""
+    """Return uo_out[4]."""
+
     return (int(dut.uo_out.value) >> 4) & 0x01
 
 
 def get_state(dut):
-    """Return the FSM state from uo_out[7:5]."""
+    """Return uo_out[7:5]."""
+
     return (int(dut.uo_out.value) >> 5) & 0x07
+
+
+# ================================================================
+# INPUT HELPERS
+# ================================================================
+
+async def set_design(
+    dut,
+    design_select,
+    trojan_enable=False,
+):
+    """
+    Set the design selector and manual Trojan enable.
+
+    uio_in[1:0] = design selector
+    uio_in[2]   = manual Trojan enable
+    """
+
+    value = design_select & 0x03
+
+    if trojan_enable:
+        value |= 0x04
+
+    await NextTimeStep()
+    dut.uio_in.value = value
 
 
 async def reset_dut(dut):
     """Apply the active-low Tiny Tapeout reset."""
 
-    dut._log.info("Reset")
-
     dut.ena.value = 1
     dut.ui_in.value = 0
-    dut.uio_in.value = 0
-
     dut.rst_n.value = 0
+
     await ClockCycles(dut.clk, 10)
 
     dut.rst_n.value = 1
+
     await ClockCycles(dut.clk, 10)
 
 
+async def select_and_reset(
+    dut,
+    design_select,
+    trojan_enable=False,
+):
+    """
+    Select one design, then reset all controllers.
+
+    Resetting after changing the selector guarantees that the newly
+    selected controller begins in SAMPLE.
+    """
+
+    await set_design(
+        dut,
+        design_select,
+        trojan_enable,
+    )
+
+    await reset_dut(dut)
+
+
+# ================================================================
+# COMPARATOR MODEL
+# ================================================================
+
 async def comparator_model(dut, input_code):
     """
-    Model the external analog comparator.
+    Model the external comparator.
 
-    input_code represents the analog input as an ideal 4-bit value
-    from 0 to 15.
+    Comparator HIGH means:
 
-    Comparator HIGH means the trial DAC value should be kept.
+        input_code >= selected physical DAC code
+
+    The model waits for uo_out changes instead of checking every
+    high-frequency clock edge.
     """
 
+    await NextTimeStep()
+
+    dut.ui_in.value = (
+        1 if input_code >= get_dac_code(dut) else 0
+    )
+
     while True:
-        await RisingEdge(dut.clk)
+        await ValueChange(dut.uo_out)
+        await ReadOnly()
 
         trial_code = get_dac_code(dut)
 
-        if input_code >= trial_code:
-            # ui_in[0] = comparator output
-            dut.ui_in.value = 0x01
-        else:
-            dut.ui_in.value = 0x00
+        comparator_value = (
+            1 if input_code >= trial_code else 0
+        )
+
+        await NextTimeStep()
+        dut.ui_in.value = comparator_value
 
 
-async def wait_for_done(dut, timeout_cycles=20_000):
-    """Wait until the SAR state machine reaches the DONE state."""
+# ================================================================
+# STATE HELPERS
+# ================================================================
 
-    for _ in range(timeout_cycles):
-        await RisingEdge(dut.clk)
+async def wait_for_output_change(dut):
+    """Wait for a visible output change with a timeout."""
 
-        if get_state(dut) == DONE:
-            return
+    await with_timeout(
+        ValueChange(dut.uo_out),
+        OUTPUT_TIMEOUT_US,
+        "us",
+    )
+
+    await ReadOnly()
+
+
+async def wait_for_state(
+    dut,
+    target_state,
+    max_changes=40,
+):
+    """Wait until the selected controller reaches target_state."""
+
+    if get_state(dut) == target_state:
+        return get_dac_code(dut)
+
+    for _ in range(max_changes):
+        await wait_for_output_change(dut)
+
+        if get_state(dut) == target_state:
+            return get_dac_code(dut)
 
     raise AssertionError(
-        f"Timed out waiting for DONE state. "
-        f"Current state = {get_state(dut)}, "
-        f"DAC = {get_dac_code(dut):04b}"
+        f"Timed out waiting for state {target_state}. "
+        f"Current state={get_state(dut)}, "
+        f"DAC={get_dac_code(dut):04b}"
     )
 
 
-async def run_conversion(dut, input_code):
-    """
-    Run one complete ideal SAR conversion.
+async def wait_for_conversion_done(dut):
+    """Wait for the next completed conversion."""
 
-    Returns the final 4-bit DAC result.
-    """
+    if get_state(dut) == DONE:
+        while get_state(dut) == DONE:
+            await wait_for_output_change(dut)
 
-    dut._log.info(
-        f"Testing simulated analog input code "
-        f"{input_code:04b} ({input_code})"
+    return await wait_for_state(
+        dut,
+        DONE,
     )
+
+
+async def run_conversion(
+    dut,
+    input_code,
+    design_name,
+):
+    """Run one SAR conversion and verify its result."""
 
     comparator_task = cocotb.start_soon(
-        comparator_model(dut, input_code)
+        comparator_model(
+            dut,
+            input_code,
+        )
     )
 
-    await wait_for_done(dut)
+    result = await wait_for_conversion_done(dut)
 
-    result = get_dac_code(dut)
+    comparator_task.cancel()
 
     dut._log.info(
-        f"Input code = {input_code:04b} ({input_code}), "
-        f"SAR result = {result:04b} ({result})"
+        f"{design_name}: "
+        f"input={input_code:04b} ({input_code}), "
+        f"result={result:04b} ({result})"
     )
 
-    comparator_task.kill()
+    assert result == input_code, (
+        f"{design_name} failed. "
+        f"Expected {input_code:04b}, "
+        f"received {result:04b}"
+    )
 
     return result
 
 
-@cocotb.test()
-async def test_project(dut):
-    dut._log.info("Start 4-bit SAR ADC controller test")
+# ================================================================
+# QUICK COMBINED-DESIGN TEST
+# ================================================================
 
-    # The Verilog divider assumes a 50 MHz Tiny Tapeout clock.
+@cocotb.test()
+async def test_three_designs(dut):
+    """
+    Quickly verify all three integrated SAR controllers.
+
+    Only one conversion is run for each selector value. The long
+    Trojan trigger windows are intentionally not simulated here.
+    """
+
+    dut._log.info(
+        "Start quick three-design integration test"
+    )
+
+    clock = Clock(
+        dut.clk,
+        20,
+        unit="ns",
+    )
+
+    cocotb.start_soon(clock.start())
+
+    input_code = 10
+
+    # ------------------------------------------------------------
+    # CLEAN DESIGN: selector 00
+    # ------------------------------------------------------------
+
+    await select_and_reset(
+        dut,
+        CLEAN_SELECT,
+    )
+
+    assert get_state(dut) == SAMPLE
+    assert get_sample_switch(dut) == 1
+    assert get_dac_code(dut) == 0
+
+    await run_conversion(
+        dut,
+        input_code,
+        "Clean design",
+    )
+
+    # ------------------------------------------------------------
+    # MANUAL TROJAN DESIGN: selector 01
     #
-    # 20 ns period = 50 MHz
-    clock = Clock(dut.clk, 20, unit="ns")
-    cocotb.start_soon(clock.start())
+    # Trojan enable remains low, so this must behave cleanly.
+    # ------------------------------------------------------------
 
-    await reset_dut(dut)
-
-    dut._log.info("Test reset behavior")
-
-    # After reset, the controller should begin in SAMPLE.
-    assert get_state(dut) == SAMPLE, (
-        f"Expected SAMPLE state after reset, "
-        f"but state was {get_state(dut)}"
+    await select_and_reset(
+        dut,
+        MANUAL_SELECT,
+        trojan_enable=False,
     )
 
-    assert get_sample_switch(dut) == 1, (
-        "Sample switch should be enabled after reset"
+    assert get_state(dut) == SAMPLE
+    assert get_sample_switch(dut) == 1
+    assert get_dac_code(dut) == 0
+
+    await run_conversion(
+        dut,
+        input_code,
+        "Manual-Trojan design, disabled",
     )
 
-    assert get_dac_code(dut) == 0, (
-        f"DAC should be 0000 after reset, "
-        f"but was {get_dac_code(dut):04b}"
+    # ------------------------------------------------------------
+    # AUTOMATIC TROJAN DESIGN: selector 10
+    #
+    # The first conversion occurs before the automatic trigger.
+    # ------------------------------------------------------------
+
+    await select_and_reset(
+        dut,
+        AUTO_SELECT,
     )
 
-    dut._log.info("Test SAR conversion for input code 10")
+    assert get_state(dut) == SAMPLE
+    assert get_sample_switch(dut) == 1
+    assert get_dac_code(dut) == 0
 
-    result = await run_conversion(dut, 10)
-
-    assert result == 10, (
-        f"Expected SAR result 1010 (10), "
-        f"but received {result:04b} ({result})"
+    await run_conversion(
+        dut,
+        input_code,
+        "Automatic-Trojan design, pre-trigger",
     )
 
+    # ------------------------------------------------------------
+    # RESERVED SELECTOR: selector 11
+    #
+    # project.v maps this value back to the clean controller.
+    # ------------------------------------------------------------
 
-@cocotb.test()
-async def test_low_input(dut):
-    dut._log.info("Start low-input SAR test")
-
-    clock = Clock(dut.clk, 20, unit="ns")
-    cocotb.start_soon(clock.start())
-
-    await reset_dut(dut)
-
-    result = await run_conversion(dut, 3)
-
-    assert result == 3, (
-        f"Expected SAR result 0011 (3), "
-        f"but received {result:04b} ({result})"
+    await select_and_reset(
+        dut,
+        DEFAULT_SELECT,
     )
 
+    assert get_state(dut) == SAMPLE
+    assert get_sample_switch(dut) == 1
+    assert get_dac_code(dut) == 0
 
-@cocotb.test()
-async def test_high_input(dut):
-    dut._log.info("Start high-input SAR test")
-
-    clock = Clock(dut.clk, 20, unit="ns")
-    cocotb.start_soon(clock.start())
-
-    await reset_dut(dut)
-
-    result = await run_conversion(dut, 14)
-
-    assert result == 14, (
-        f"Expected SAR result 1110 (14), "
-        f"but received {result:04b} ({result})"
+    await run_conversion(
+        dut,
+        input_code,
+        "Default selector",
     )
 
-
-@cocotb.test()
-async def test_all_input_codes(dut):
-    """
-    Test every possible 4-bit ADC input code from 0 through 15.
-    """
-
-    dut._log.info("Start complete 4-bit SAR sweep")
-
-    clock = Clock(dut.clk, 20, unit="ns")
-    cocotb.start_soon(clock.start())
-
-    for input_code in range(16):
-        await reset_dut(dut)
-
-        result = await run_conversion(dut, input_code)
-
-        assert result == input_code, (
-            f"Input {input_code:04b}: "
-            f"expected {input_code:04b}, "
-            f"received {result:04b}"
-        )
+    dut._log.info(
+        "All three controller selections passed"
+    )
