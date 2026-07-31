@@ -11,6 +11,7 @@ module sar_adc_auto_trojan (
 
     output reg        sample_sw,
     output wire [3:0] dac,
+    output reg  [3:0] result_code,
     output wire [2:0] state_out
 );
 
@@ -77,6 +78,7 @@ module sar_adc_auto_trojan (
             state                   <= SAMPLE;
             sample_sw               <= 1'b1;
             sar_dac                 <= 4'b0000;
+            result_code             <= 4'b0000;
             bit_index               <= 2'd3;
             trojan_conversion_count <= 9'd0;
         end
@@ -154,6 +156,10 @@ module sar_adc_auto_trojan (
                 //================================================
 
                 DONE: begin
+                    // Latch the internal SAR decision code. The physical
+                    // DAC output may be inverted by the Trojan.
+                    result_code <= sar_dac;
+
                     sample_sw <= 1'b1;
                     bit_index <= 2'd3;
                     state     <= SAMPLE;
@@ -184,6 +190,7 @@ module sar_adc_auto_trojan (
                     state                   <= SAMPLE;
                     sample_sw               <= 1'b1;
                     sar_dac                 <= 4'b0000;
+                    result_code             <= 4'b0000;
                     bit_index               <= 2'd3;
                     trojan_conversion_count <= 9'd0;
                 end
