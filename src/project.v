@@ -365,12 +365,7 @@ module tt_um_josue_olivos_sar_adc (
 
     wire _unused;
 
-    assign _unused = &{
-        ena,
-        ui_in[7:4],
-        uio_in[7:4],
-        1'b0
-    };
+    assign _unused = &{ena,ui_in[7:4],uio_in,1'b0};
 
 endmodule
 
