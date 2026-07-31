@@ -2,7 +2,7 @@
 project:
   title:        "4-Bit Charge-Redistribution SAR ADC Controller"
   author:       "Josue Olivos"
-  discord:      ""  # Add your Discord username if desired
+  discord:      ".o0trippy0o."
   description:  "Three selectable digital controllers for an external 4-bit charge-redistribution SAR ADC: clean, manually enabled Trojan, and automatically triggered Trojan designs."
   language:     "Verilog"
   clock_hz:     50000000
@@ -24,29 +24,29 @@ project:
 pinout:
   # Dedicated inputs
   ui[0]: "Comparator output"
-  ui[1]: ""
-  ui[2]: ""
-  ui[3]: ""
+  ui[1]: "Design select bit 0"
+  ui[2]: "Design select bit 1"
+  ui[3]: "Manual Trojan enable"
   ui[4]: ""
   ui[5]: ""
   ui[6]: ""
   ui[7]: ""
 
   # Dedicated outputs
-  uo[0]: "Selected DAC bit 0 - LSB"
-  uo[1]: "Selected DAC bit 1"
-  uo[2]: "Selected DAC bit 2"
-  uo[3]: "Selected DAC bit 3 - MSB"
+  uo[0]: "Selected live DAC bit 0 - LSB"
+  uo[1]: "Selected live DAC bit 1"
+  uo[2]: "Selected live DAC bit 2"
+  uo[3]: "Selected live DAC bit 3 - MSB"
   uo[4]: "Selected sample switch control"
   uo[5]: "Selected FSM state bit 0"
   uo[6]: "Selected FSM state bit 1"
   uo[7]: "Selected FSM state bit 2"
 
-  # Bidirectional pins configured as inputs
-  uio[0]: "Design select bit 0"
-  uio[1]: "Design select bit 1"
-  uio[2]: "Manual Trojan enable"
-  uio[3]: ""
+  # Bidirectional pins configured as outputs
+  uio[0]: "Final ADC result bit 0 - LSB"
+  uio[1]: "Final ADC result bit 1"
+  uio[2]: "Final ADC result bit 2"
+  uio[3]: "Final ADC result bit 3 - MSB"
   uio[4]: ""
   uio[5]: ""
   uio[6]: ""
