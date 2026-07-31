@@ -11,6 +11,7 @@ module sar_adc_clean (
 
     output reg        sample_sw,
     output reg  [3:0] dac,
+    output reg  [3:0] result_code,
     output wire [2:0] state_out
 );
 
@@ -42,8 +43,9 @@ module sar_adc_clean (
         if (!rst_n) begin
             state     <= SAMPLE;
             sample_sw <= 1'b1;
-            dac       <= 4'b0000;
-            bit_index <= 2'd3;
+            dac         <= 4'b0000;
+            result_code <= 4'b0000;
+            bit_index   <= 2'd3;
         end
         else if (adc_tick) begin
             case (state)
@@ -90,16 +92,21 @@ module sar_adc_clean (
                 end
 
                 DONE: begin
+                    // Preserve the completed conversion while the next
+                    // SAR conversion changes the live DAC trial bits.
+                    result_code <= dac;
+
                     sample_sw <= 1'b1;
                     bit_index <= 2'd3;
                     state     <= SAMPLE;
                 end
 
                 default: begin
-                    state     <= SAMPLE;
-                    sample_sw <= 1'b1;
-                    dac       <= 4'b0000;
-                    bit_index <= 2'd3;
+                    state       <= SAMPLE;
+                    sample_sw   <= 1'b1;
+                    dac         <= 4'b0000;
+                    result_code <= 4'b0000;
+                    bit_index   <= 2'd3;
                 end
 
             endcase
