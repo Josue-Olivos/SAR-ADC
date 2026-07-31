@@ -270,8 +270,8 @@ async def wait_for_latched_result(dut):
     while get_state(dut) == DONE:
         await wait_for_output_change(dut)
 
-    await ReadOnly()
-
+    # wait_for_output_change() already leaves us in ReadOnly,
+    # so read the stable result directly.
     return get_result_code(dut)
 
 
