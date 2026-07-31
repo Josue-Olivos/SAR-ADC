@@ -18,20 +18,24 @@ from cocotb.triggers import (
 #
 # ui_in[0]    = comparator output
 #
-# uio_in[1:0] = design selector
+# ui_in[2:1]  = design selector
 #               00 = clean
 #               01 = manual Trojan
 #               10 = automatic Trojan
 #               11 = clean/default
 #
-# uio_in[2]   = manual Trojan enable
+# ui_in[3]    = manual Trojan enable
 #
-# uo_out[3:0] = selected DAC output
+# uo_out[3:0] = selected live DAC output
 # uo_out[4]   = selected sample switch
 # uo_out[7:5] = selected FSM state
+#
+# uio_out[3:0] = stable final ADC conversion code
+# uio_oe[3:0]  = 1111, configuring these pins as outputs
 
 
 DAC_MASK = 0x0F
+RESULT_MASK = 0x0F
 
 SAMPLE = 0
 HOLD = 1
@@ -53,21 +57,33 @@ OUTPUT_TIMEOUT_US = 2_000
 # ================================================================
 
 def get_dac_code(dut):
-    """Return uo_out[3:0]."""
+    """Return the live capacitor-DAC control code from uo_out[3:0]."""
 
     return int(dut.uo_out.value) & DAC_MASK
 
 
 def get_sample_switch(dut):
-    """Return uo_out[4]."""
+    """Return the sample-switch control from uo_out[4]."""
 
     return (int(dut.uo_out.value) >> 4) & 0x01
 
 
 def get_state(dut):
-    """Return uo_out[7:5]."""
+    """Return the selected controller state from uo_out[7:5]."""
 
     return (int(dut.uo_out.value) >> 5) & 0x07
+
+
+def get_result_code(dut):
+    """Return the stable completed ADC code from uio_out[3:0]."""
+
+    return int(dut.uio_out.value) & RESULT_MASK
+
+
+def get_result_output_enable(dut):
+    """Return the output-enable settings for uio[3:0]."""
+
+    return int(dut.uio_oe.value) & RESULT_MASK
 
 
 # ================================================================
@@ -80,32 +96,55 @@ async def set_design(
     trojan_enable=False,
 ):
     """
-    Set the design selector and manual Trojan enable.
+    Set the design selector and manual-Trojan enable.
 
-    uio_in[1:0] = design selector
-    uio_in[2]   = manual Trojan enable
+    ui_in[2:1] = design selector
+    ui_in[3]   = manual-Trojan enable
+    ui_in[0]   = comparator output and is preserved
     """
 
-    value = design_select & 0x03
+    await NextTimeStep()
+
+    current_value = int(dut.ui_in.value)
+
+    # Preserve comparator bit ui_in[0] and unused upper bits.
+    value = current_value & ~0x0E
+
+    value |= (design_select & 0x03) << 1
 
     if trojan_enable:
-        value |= 0x04
+        value |= 0x08
+
+    dut.ui_in.value = value
+
+
+async def set_comparator(dut, comparator_value):
+    """
+    Drive ui_in[0] without changing the selector or Trojan-enable bits.
+    """
 
     await NextTimeStep()
-    dut.uio_in.value = value
+
+    current_value = int(dut.ui_in.value)
+    dut.ui_in.value = (
+        (current_value & 0xFE)
+        | (comparator_value & 0x01)
+    )
 
 
 async def reset_dut(dut):
     """Apply the active-low Tiny Tapeout reset."""
 
     dut.ena.value = 1
-    dut.ui_in.value = 0
-    dut.rst_n.value = 0
+    dut.uio_in.value = 0
 
+    # Clear only the comparator input. Preserve ui_in[3:1].
+    await set_comparator(dut, 0)
+
+    dut.rst_n.value = 0
     await ClockCycles(dut.clk, 10)
 
     dut.rst_n.value = 1
-
     await ClockCycles(dut.clk, 10)
 
 
@@ -142,14 +181,14 @@ async def comparator_model(dut, input_code):
 
         input_code >= selected physical DAC code
 
-    The model waits for uo_out changes instead of checking every
-    high-frequency clock edge.
+    The model responds whenever uo_out changes. Only ui_in[0] is
+    modified, so the design selector and Trojan-enable inputs remain
+    unchanged.
     """
 
-    await NextTimeStep()
-
-    dut.ui_in.value = (
-        1 if input_code >= get_dac_code(dut) else 0
+    await set_comparator(
+        dut,
+        1 if input_code >= get_dac_code(dut) else 0,
     )
 
     while True:
@@ -162,8 +201,10 @@ async def comparator_model(dut, input_code):
             1 if input_code >= trial_code else 0
         )
 
-        await NextTimeStep()
-        dut.ui_in.value = comparator_value
+        await set_comparator(
+            dut,
+            comparator_value,
+        )
 
 
 # ================================================================
@@ -171,7 +212,7 @@ async def comparator_model(dut, input_code):
 # ================================================================
 
 async def wait_for_output_change(dut):
-    """Wait for a visible output change with a timeout."""
+    """Wait for a visible uo_out change with a timeout."""
 
     await with_timeout(
         ValueChange(dut.uo_out),
@@ -190,32 +231,48 @@ async def wait_for_state(
     """Wait until the selected controller reaches target_state."""
 
     if get_state(dut) == target_state:
-        return get_dac_code(dut)
+        return
 
     for _ in range(max_changes):
         await wait_for_output_change(dut)
 
         if get_state(dut) == target_state:
-            return get_dac_code(dut)
+            return
 
     raise AssertionError(
         f"Timed out waiting for state {target_state}. "
         f"Current state={get_state(dut)}, "
-        f"DAC={get_dac_code(dut):04b}"
+        f"DAC={get_dac_code(dut):04b}, "
+        f"result={get_result_code(dut):04b}"
     )
 
 
-async def wait_for_conversion_done(dut):
-    """Wait for the next completed conversion."""
+async def wait_for_latched_result(dut):
+    """
+    Wait for one conversion and return the stable result register.
+
+    The controller first enters DONE. On the following adc_tick, the
+    DONE state copies the completed SAR code into result_code and
+    returns to SAMPLE. Therefore, this helper waits until DONE is
+    reached and then waits until the controller leaves DONE before
+    reading uio_out[3:0].
+    """
 
     if get_state(dut) == DONE:
         while get_state(dut) == DONE:
             await wait_for_output_change(dut)
 
-    return await wait_for_state(
+    await wait_for_state(
         dut,
         DONE,
     )
+
+    while get_state(dut) == DONE:
+        await wait_for_output_change(dut)
+
+    await ReadOnly()
+
+    return get_result_code(dut)
 
 
 async def run_conversion(
@@ -223,7 +280,7 @@ async def run_conversion(
     input_code,
     design_name,
 ):
-    """Run one SAR conversion and verify its result."""
+    """Run one SAR conversion and verify the stable final code."""
 
     comparator_task = cocotb.start_soon(
         comparator_model(
@@ -232,19 +289,19 @@ async def run_conversion(
         )
     )
 
-    result = await wait_for_conversion_done(dut)
+    result = await wait_for_latched_result(dut)
 
     comparator_task.cancel()
 
     dut._log.info(
         f"{design_name}: "
         f"input={input_code:04b} ({input_code}), "
-        f"result={result:04b} ({result})"
+        f"latched result={result:04b} ({result})"
     )
 
     assert result == input_code, (
         f"{design_name} failed. "
-        f"Expected {input_code:04b}, "
+        f"Expected stable result {input_code:04b}, "
         f"received {result:04b}"
     )
 
@@ -258,14 +315,15 @@ async def run_conversion(
 @cocotb.test()
 async def test_three_designs(dut):
     """
-    Quickly verify all three integrated SAR controllers.
+    Verify all three integrated SAR controllers with one conversion
+    per selector setting.
 
-    Only one conversion is run for each selector value. The long
-    Trojan trigger windows are intentionally not simulated here.
+    Long manual and automatic Trojan trigger windows are intentionally
+    not simulated in this quick integration test.
     """
 
     dut._log.info(
-        "Start quick three-design integration test"
+        "Start quick three-design result-register test"
     )
 
     clock = Clock(
@@ -275,6 +333,18 @@ async def test_three_designs(dut):
     )
 
     cocotb.start_soon(clock.start())
+
+    dut.ui_in.value = 0
+    dut.uio_in.value = 0
+    dut.ena.value = 1
+    dut.rst_n.value = 0
+
+    await ClockCycles(dut.clk, 2)
+
+    assert get_result_output_enable(dut) == 0x0F, (
+        "uio[3:0] must be configured as outputs. "
+        f"Observed uio_oe[3:0]={get_result_output_enable(dut):04b}"
+    )
 
     input_code = 10
 
@@ -290,6 +360,7 @@ async def test_three_designs(dut):
     assert get_state(dut) == SAMPLE
     assert get_sample_switch(dut) == 1
     assert get_dac_code(dut) == 0
+    assert get_result_code(dut) == 0
 
     await run_conversion(
         dut,
@@ -312,6 +383,7 @@ async def test_three_designs(dut):
     assert get_state(dut) == SAMPLE
     assert get_sample_switch(dut) == 1
     assert get_dac_code(dut) == 0
+    assert get_result_code(dut) == 0
 
     await run_conversion(
         dut,
@@ -333,6 +405,7 @@ async def test_three_designs(dut):
     assert get_state(dut) == SAMPLE
     assert get_sample_switch(dut) == 1
     assert get_dac_code(dut) == 0
+    assert get_result_code(dut) == 0
 
     await run_conversion(
         dut,
@@ -354,6 +427,7 @@ async def test_three_designs(dut):
     assert get_state(dut) == SAMPLE
     assert get_sample_switch(dut) == 1
     assert get_dac_code(dut) == 0
+    assert get_result_code(dut) == 0
 
     await run_conversion(
         dut,
@@ -362,5 +436,5 @@ async def test_three_designs(dut):
     )
 
     dut._log.info(
-        "All three controller selections passed"
+        "All controller selections and stable result outputs passed"
     )
