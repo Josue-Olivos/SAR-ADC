@@ -22,13 +22,13 @@ module tt_um_josue_olivos_sar_adc (
     // ui_in[0]:
     //     External comparator output
     //
-    // uio_in[1:0]:
+    // ui_in[2:1]:
     //     00 = clean SAR ADC
     //     01 = manually enabled Trojan SAR ADC
     //     10 = automatically triggered Trojan SAR ADC
     //     11 = clean SAR ADC
     //
-    // uio_in[2]:
+    // ui_in[3]:
     //     Manual Trojan enable
     //
     // uo_out[3:0]:
@@ -39,6 +39,12 @@ module tt_um_josue_olivos_sar_adc (
     //
     // uo_out[7:5]:
     //     Selected SAR state
+    //
+    // uio_out[3:0]:
+    //     Stable final 4-bit ADC conversion code
+    //
+    // uio[7:4]:
+    //     Unused inputs
 
 
     wire       comp_out;
@@ -46,8 +52,8 @@ module tt_um_josue_olivos_sar_adc (
     wire       manual_trojan_enable;
 
     assign comp_out             = ui_in[0];
-    assign design_select        = uio_in[1:0];
-    assign manual_trojan_enable = uio_in[2];
+    assign design_select        = ui_in[2:1];
+    assign manual_trojan_enable = ui_in[3];
 
 
     //============================================================
@@ -197,6 +203,7 @@ module tt_um_josue_olivos_sar_adc (
     //============================================================
 
     wire [3:0] clean_dac;
+    wire [3:0] clean_result;
     wire       clean_sample_sw;
     wire [2:0] clean_state;
 
@@ -209,8 +216,9 @@ module tt_um_josue_olivos_sar_adc (
         .comp_sync (comp_sync),
 
         .sample_sw (clean_sample_sw),
-        .dac       (clean_dac),
-        .state_out (clean_state)
+        .dac         (clean_dac),
+        .result_code (clean_result),
+        .state_out   (clean_state)
     );
 
 
@@ -219,6 +227,7 @@ module tt_um_josue_olivos_sar_adc (
     //============================================================
 
     wire [3:0] manual_dac;
+    wire [3:0] manual_result;
     wire       manual_sample_sw;
     wire [2:0] manual_state;
 
@@ -234,6 +243,7 @@ module tt_um_josue_olivos_sar_adc (
 
         .sample_sw     (manual_sample_sw),
         .dac           (manual_dac),
+        .result_code   (manual_result),
         .state_out     (manual_state)
     );
 
@@ -243,6 +253,7 @@ module tt_um_josue_olivos_sar_adc (
     //============================================================
 
     wire [3:0] auto_dac;
+    wire [3:0] auto_result;
     wire       auto_sample_sw;
     wire [2:0] auto_state;
 
@@ -255,8 +266,9 @@ module tt_um_josue_olivos_sar_adc (
         .comp_sync (comp_sync),
 
         .sample_sw (auto_sample_sw),
-        .dac       (auto_dac),
-        .state_out (auto_state)
+        .dac         (auto_dac),
+        .result_code (auto_result),
+        .state_out   (auto_state)
     );
 
 
@@ -265,6 +277,7 @@ module tt_um_josue_olivos_sar_adc (
     //============================================================
 
     reg [3:0] selected_dac;
+    reg [3:0] selected_result;
     reg       selected_sample_sw;
     reg [2:0] selected_state;
 
@@ -275,6 +288,7 @@ module tt_um_josue_olivos_sar_adc (
          */
 
         selected_dac       = clean_dac;
+        selected_result    = clean_result;
         selected_sample_sw = clean_sample_sw;
         selected_state     = clean_state;
 
@@ -283,6 +297,7 @@ module tt_um_josue_olivos_sar_adc (
             // Clean SAR ADC
             2'b00: begin
                 selected_dac       = clean_dac;
+                selected_result    = clean_result;
                 selected_sample_sw = clean_sample_sw;
                 selected_state     = clean_state;
             end
@@ -290,6 +305,7 @@ module tt_um_josue_olivos_sar_adc (
             // Manually enabled Trojan
             2'b01: begin
                 selected_dac       = manual_dac;
+                selected_result    = manual_result;
                 selected_sample_sw = manual_sample_sw;
                 selected_state     = manual_state;
             end
@@ -297,6 +313,7 @@ module tt_um_josue_olivos_sar_adc (
             // Automatically triggered Trojan
             2'b10: begin
                 selected_dac       = auto_dac;
+                selected_result    = auto_result;
                 selected_sample_sw = auto_sample_sw;
                 selected_state     = auto_state;
             end
@@ -304,6 +321,7 @@ module tt_um_josue_olivos_sar_adc (
             // Reserved selector defaults to clean
             default: begin
                 selected_dac       = clean_dac;
+                selected_result    = clean_result;
                 selected_sample_sw = clean_sample_sw;
                 selected_state     = clean_state;
             end
@@ -326,13 +344,19 @@ module tt_um_josue_olivos_sar_adc (
     //============================================================
 
     /*
-     * All eight bidirectional pins are configured as inputs.
+     * uio[3:0] are outputs carrying the stable final ADC code.
+     * uio[7:4] remain inputs and are currently unused.
      *
-     * Only uio_in[2:0] are currently used.
+     * Bit order:
+     *     uio[3] = result MSB
+     *     uio[0] = result LSB
      */
 
-    assign uio_out = 8'b00000000;
-    assign uio_oe  = 8'b00000000;
+    assign uio_out[3:0] = selected_result;
+    assign uio_out[7:4] = 4'b0000;
+
+    assign uio_oe[3:0]  = 4'b1111;
+    assign uio_oe[7:4]  = 4'b0000;
 
 
     //============================================================
@@ -343,8 +367,8 @@ module tt_um_josue_olivos_sar_adc (
 
     assign _unused = &{
         ena,
-        ui_in[7:1],
-        uio_in[7:3],
+        ui_in[7:4],
+        uio_in[7:4],
         1'b0
     };
 
