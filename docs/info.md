@@ -54,19 +54,6 @@ To test the manual Trojan, select `01` and control it with `ui_in[3]`.
 
 To test the automatic Trojan, select `10` and observe the outputs over multiple conversions. A logic analyzer or oscilloscope is recommended for observing the Trojan behavior.
 
-## Simulation testing
-
-The Cocotb testbench verifies:
-
-* Clean controller operation
-* Manual controller with the Trojan disabled
-* Automatic controller before its trigger window
-* Default selector behavior
-* Stable result output on `uio_out[3:0]`
-* Correct output-enable configuration
-
-Long Trojan trigger windows are not simulated during the quick gate-level test because they require hundreds of conversions.
-
 ## External hardware
 
 * Binary-weighted capacitor array
