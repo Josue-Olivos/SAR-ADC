@@ -1,370 +1,81 @@
 ## How it works
 
-This project implements three selectable versions of the digital control logic for a 4-bit successive approximation register analog-to-digital converter, or SAR ADC.
+This project contains three selectable 4-bit SAR ADC controllers:
 
-The three internal designs are:
+* `00` – Clean controller
+* `01` – Manual-Trojan controller
+* `10` – Automatic-Trojan controller
+* `11` – Clean/default
 
-1. A clean SAR ADC controller
-2. A manually enabled hardware-Trojan SAR ADC controller
-3. An automatically triggered hardware-Trojan SAR ADC controller
+The controllers share a clock divider and comparator synchronizer. The selected controller drives an external capacitor DAC, sample switch, and comparator.
 
-All three controllers share the same clock divider and comparator synchronizer to reduce the total hardware area. Only the selected controller is allowed to advance through its conversion sequence, and a multiplexer connects the selected controller to the physical Tiny Tapeout outputs.
+During each conversion, the SAR controller samples the input, tests each bit from MSB to LSB, reads the comparator, and stores the completed 4-bit result.
 
-The analog portion of the ADC is built externally using a binary-weighted capacitor array, analog switches, a sample-and-hold switch, and a comparator. The Tiny Tapeout design controls the sampling switch and the four capacitor-DAC switches.
+The live DAC-control code is available on `uo_out[3:0]`, while the stable final ADC result is available on `uio_out[3:0]`.
 
-Each controller contains two separate 4-bit values:
-
-* The live DAC-control code, which changes during the successive-approximation process
-* The final conversion-code register, which stores the completed 4-bit ADC result
-
-The live DAC-control code is connected to `uo_out[3:0]`. These signals control the external capacitor switches and change throughout the conversion.
-
-The stable final conversion code is connected to `uio_out[3:0]`. This value is updated only after all four SAR decisions have been completed and remains stable while the next conversion is taking place.
-
-During a normal conversion, the selected controller performs the following sequence:
-
-1. The sample switch is enabled so the capacitor array can sample the analog input voltage.
-2. The sample switch is disabled to hold the sampled voltage.
-3. The controller tests the most significant bit by enabling the corresponding capacitor switch.
-4. The external comparator determines whether the trial DAC voltage is above or below the sampled input voltage.
-5. Based on the comparator result, the controller either keeps or clears the trial bit.
-6. The same process is repeated for the remaining bits, from the most significant bit to the least significant bit.
-7. After all four bits have been tested, the internal SAR value contains the completed 4-bit conversion code.
-8. The completed code is copied into the stable final-result register.
-9. The controller returns to the sampling state and begins another conversion.
-
-The live DAC outputs may immediately begin changing again during the next conversion, but the final-result register continues holding the previous completed code until a new conversion is finished.
-
-A shared clock divider generates a slower enable pulse for the selected SAR state machine. This gives the external capacitor DAC, analog switches, and comparator enough time to settle between conversion steps.
-
-## Design selection
-
-The dedicated input pins `ui_in[2:1]` select which SAR ADC controller is connected to the physical outputs.
-
-* `ui_in[2:1] = 00`: Clean SAR ADC controller
-* `ui_in[2:1] = 01`: Manually enabled Trojan SAR ADC controller
-* `ui_in[2:1] = 10`: Automatically triggered Trojan SAR ADC controller
-* `ui_in[2:1] = 11`: Clean SAR ADC controller by default
-
-The manual-Trojan controller uses `ui_in[3]` as its enable input.
-
-* `ui_in[3] = 0`: Manual Trojan disabled
-* `ui_in[3] = 1`: Manual Trojan enabled
-
-The manual enable input is ignored when the clean or automatic design is selected.
-
-The selector should remain unchanged during a conversion. It is recommended to assert reset after changing the selected design so the newly selected controller begins in the sampling state.
-
-## Clean controller
-
-The clean controller performs the normal SAR conversion process without intentionally modifying the capacitor-DAC control outputs.
-
-During the conversion, its internal DAC register is used to test each bit. When the controller reaches the conversion-complete state, the final DAC value is copied into the stable result register.
-
-The live DAC-control signals are available on `uo_out[3:0]`, while the stable final ADC code is available on `uio_out[3:0]`.
-
-## Manually enabled Trojan controller
-
-The manually enabled Trojan controller behaves normally while `ui_in[3]` is low.
-
-When `ui_in[3]` is high, the internal Trojan sequence is enabled. The controller alternates between normal and infected operating periods according to its internal conversion counter.
-
-During the infected period, the physical capacitor-DAC control outputs are intentionally inverted. This changes the voltages generated by the external capacitor DAC and may cause the comparator decisions and final ADC result to become incorrect.
-
-The stable final-result register stores the internal SAR decision code after each conversion. Because the Trojan changes the physical DAC feedback during conversion, the latched result may differ from the result produced by the clean controller for the same analog input.
-
-This design allows the Trojan behavior to be turned on and off externally for testing and comparison.
-
-## Automatically triggered Trojan controller
-
-The automatic Trojan controller does not require an external enable signal.
-
-It uses an internal conversion counter to activate the Trojan automatically. During normal operation, most conversions use the unmodified SAR DAC output. During the trigger window, a smaller group of conversions uses intentionally modified DAC-control outputs.
-
-In the current implementation:
-
-* 450 conversions operate normally
-* 50 conversions operate with the Trojan active
-* The sequence then repeats
-
-During the active window, the physical capacitor-DAC control outputs are inverted. This creates an intermittent fault that can be compared against the clean and manually enabled designs.
-
-The stable final-result register stores the completed SAR code after every conversion, including conversions performed while the automatic Trojan is active.
+The manual Trojan is enabled with `ui_in[3]`. The automatic Trojan activates internally for 50 conversions after every 450 normal conversions. During an infected period, the physical DAC-control outputs are inverted.
 
 ## Pin mapping
 
-### Dedicated inputs
+### Inputs
 
-* `ui_in[0]`: External comparator output
-* `ui_in[1]`: Design-select bit 0
-* `ui_in[2]`: Design-select bit 1
-* `ui_in[3]`: Manual Trojan enable
-* `ui_in[7:4]`: Unused
+* `ui_in[0]` – Comparator output
+* `ui_in[2:1]` – Design selector
+* `ui_in[3]` – Manual Trojan enable
 
-The design-selection value is formed as:
+### Outputs
 
-```text
-ui_in[2:1]
-```
+* `uo_out[3:0]` – Live DAC-control bits
+* `uo_out[4]` – Sample-switch control
+* `uo_out[7:5]` – FSM debug state
+* `uio_out[3:0]` – Stable final ADC result
 
-Therefore:
-
-```text
-00 = Clean controller
-01 = Manual-Trojan controller
-10 = Automatic-Trojan controller
-11 = Clean controller by default
-```
-
-### Dedicated outputs
-
-* `uo_out[0]`: Selected live DAC bit 0, least significant bit
-* `uo_out[1]`: Selected live DAC bit 1
-* `uo_out[2]`: Selected live DAC bit 2
-* `uo_out[3]`: Selected live DAC bit 3, most significant bit
-* `uo_out[4]`: Selected sample-switch control
-* `uo_out[5]`: Selected state-machine state bit 0
-* `uo_out[6]`: Selected state-machine state bit 1
-* `uo_out[7]`: Selected state-machine state bit 2
-
-The four live DAC outputs are used to control the external capacitor switches. They are not intended to remain stable after a conversion because they are reused immediately during the next conversion.
-
-### Bidirectional pins
-
-The lower four bidirectional pins are configured as digital outputs.
-
-* `uio_out[0]`: Final ADC result bit 0, least significant bit
-* `uio_out[1]`: Final ADC result bit 1
-* `uio_out[2]`: Final ADC result bit 2
-* `uio_out[3]`: Final ADC result bit 3, most significant bit
-* `uio[7:4]`: Unused
-
-The output-enable signals are configured so that:
-
-```text
-uio_oe[3:0] = 1111
-uio_oe[7:4] = 0000
-```
-
-This makes `uio[3:0]` physical outputs and leaves `uio[7:4]` unused.
-
-The completed binary conversion code should be read as:
-
-```text
-uio_out[3:0]
-```
-
-For example:
-
-```text
-uio_out[3:0] = 1010
-```
-
-represents decimal code 10.
-
-## Optional FSM debug outputs
-
-The state-machine outputs on `uo_out[7:5]` are included for debugging and verification only.
-
-They allow a logic analyzer, oscilloscope, simulator, or microcontroller to observe the current SAR controller state.
-
-The state encodings are:
-
-* `000`: Sample
-* `001`: Hold
-* `010`: Set trial bit
-* `011`: Wait for DAC settling
-* `100`: Read comparator
-* `101`: Conversion complete
-
-These signals are optional for normal ADC operation. The external analog circuit does not need them.
-
-They may be left unconnected if state-machine debugging is not required. If additional physical outputs are needed in a future revision, these three pins could be reassigned after removing the state-debug connection from the top-level design.
+`uio_oe[3:0] = 1111`, configuring the lower four bidirectional pins as outputs.
 
 ## How to test
 
-Connect the selected Tiny Tapeout outputs to the external capacitor DAC and analog switches according to the pin mapping.
+Connect the external comparator to `ui_in[0]`, the DAC-control outputs to the capacitor switches, and `uo_out[4]` to the sample switch.
 
-Connect the output of the external comparator to `ui_in[0]`. The comparator output must use voltage levels compatible with the Tiny Tapeout digital input pins.
+Select the desired controller using `ui_in[2:1]`, apply reset, and provide a known analog input and reference voltage.
 
-Apply a known analog voltage to the ADC input and provide the reference voltage used by the capacitor DAC. After reset is released, the selected controller will automatically begin performing conversions.
-
-The live DAC-control signals can be observed on `uo_out[3:0]`.
-
-The stable completed ADC result should be observed on:
+Read the completed conversion from:
 
 ```text
 uio_out[3:0]
 ```
 
-The final-result pins can be connected to:
-
-* LEDs with suitable current-limiting resistors
-* A logic analyzer
-* An oscilloscope
-* A microcontroller
-* Another digital circuit
-
-Because the result register is held until the next conversion finishes, it is easier to observe than the live DAC-control signals.
-
-## Testing the clean design
-
-Set:
+For the clean controller, the expected 4-bit result is approximately:
 
 ```text
-ui_in[2:1] = 00
-ui_in[3]   = 0
+ADC code ≈ (VIN / VREF) × 15
 ```
 
-Apply reset and then release it.
+To test the manual Trojan, select `01` and control it with `ui_in[3]`.
 
-Apply a known DC input voltage first. Observe `uio_out[3:0]`, which contains the stable final SAR conversion code.
-
-For a 4-bit ADC, the expected output code can be estimated using:
-
-[
-\text{ADC code} \approx \frac{V_{IN}}{V_{REF}} \times 15
-]
-
-The result should be limited to the range from 0 through 15.
-
-For example, with a 3.3 V reference:
-
-* Approximately 0 V should produce a code near `0000`
-* Approximately 0.825 V should produce a code near `0100`
-* Approximately 1.65 V should produce a code near `0111` or `1000`
-* Approximately 2.475 V should produce a code near `1011`
-* Approximately 3.3 V should produce a code near `1111`
-
-The approximate measured voltage can be reconstructed using:
-
-[
-V_{IN} \approx \frac{\text{ADC code}}{15}V_{REF}
-]
-
-The live signals on `uo_out[3:0]` will change during each conversion. The final result should be read from `uio_out[3:0]`, not from the live DAC outputs.
-
-After confirming correct operation with fixed DC voltages, a low-frequency sine wave can be applied. A sine wave around 0.5 Hz to 2 Hz is recommended for visual testing because the output codes will change slowly enough to observe.
-
-## Testing the manually enabled Trojan design
-
-Select the manual design with:
-
-```text
-ui_in[2:1] = 01
-```
-
-First disable the Trojan:
-
-```text
-ui_in[3] = 0
-```
-
-Reset the design and verify that the stable result on `uio_out[3:0]` behaves like the clean controller.
-
-Next enable the Trojan:
-
-```text
-ui_in[3] = 1
-```
-
-Reset the design again and observe both:
-
-```text
-uo_out[3:0]  = live physical DAC controls
-uio_out[3:0] = stable completed ADC result
-```
-
-The design should initially behave normally and later enter its infected operating phase.
-
-A logic analyzer or microcontroller is recommended because the Trojan phase changes only after many completed conversions.
-
-## Testing the automatic Trojan design
-
-Select the automatic design with:
-
-```text
-ui_in[2:1] = 10
-```
-
-The value of `ui_in[3]` does not affect this design.
-
-Reset the design and observe the output over time.
-
-The controller should perform:
-
-```text
-450 normal conversions
-50 infected conversions
-Repeat
-```
-
-During the infected conversions, the live physical DAC-control signals are modified. This may cause incorrect stable results to appear on `uio_out[3:0]`.
-
-The automatic design may require a logic analyzer or oscilloscope with a sufficiently long capture window because the Trojan is active only during part of the conversion sequence.
-
-## Observing controller operation
-
-The `sample_sw` output on `uo_out[4]` can be monitored to verify the sampling and conversion phases.
-
-The optional state outputs on `uo_out[7:5]` can be monitored to confirm that the selected state machine advances through the expected sequence.
-
-The stable result register on `uio_out[3:0]` should update only after a conversion is completed.
-
-When changing between the three controller designs:
-
-1. Keep the design-selection inputs stable.
-2. Apply reset.
-3. Release reset.
-4. Begin the next measurement.
+To test the automatic Trojan, select `10` and observe the outputs over multiple conversions. A logic analyzer or oscilloscope is recommended for observing the Trojan behavior.
 
 ## Simulation testing
 
-The cocotb testbench performs a minimal integration test.
+The Cocotb testbench verifies:
 
-It runs one conversion for each selector value:
+* Clean controller operation
+* Manual controller with the Trojan disabled
+* Automatic controller before its trigger window
+* Default selector behavior
+* Stable result output on `uio_out[3:0]`
+* Correct output-enable configuration
 
-* Clean controller
-* Manual-Trojan controller with the Trojan disabled
-* Automatic-Trojan controller before its trigger window
-* Default selector value
-
-The testbench models the external comparator using the live DAC code from `uo_out[3:0]`.
-
-After the selected controller completes a conversion, the testbench reads the stable result from:
-
-```text
-uio_out[3:0]
-```
-
-The test also verifies that:
-
-```text
-uio_oe[3:0] = 1111
-```
-
-confirming that the lower four bidirectional pins are configured as outputs.
-
-The quick integration test intentionally does not simulate the complete manual or automatic Trojan trigger periods because those tests require hundreds of conversions and take significantly longer during gate-level simulation.
+Long Trojan trigger windows are not simulated during the quick gate-level test because they require hundreds of conversions.
 
 ## External hardware
 
-The project requires an external analog front end because Tiny Tapeout provides the digital control logic only.
-
-The external hardware includes:
-
-* Binary-weighted capacitor array for the 4-bit charge-redistribution DAC
-* Analog switches, such as a CD4066, for controlling the capacitor connections
-* External voltage comparator, such as an LM393 or a faster compatible comparator
-* Sample-and-hold analog switch
-* Comparator pull-up resistor when using an open-collector comparator output
+* Binary-weighted capacitor array
+* CD4066 or similar analog switches
+* External comparator such as LM393
+* Sample switch
+* Comparator pull-up resistor
 * Reference-voltage source
-* Analog input signal source
-* Decoupling capacitors for the external integrated circuits
-* Breadboard or custom printed circuit board
-* Logic analyzer, oscilloscope, LEDs, or microcontroller for observing the digital outputs
-* Jumper wires or switches for controlling `ui_in[3:1]`
-
-The same external analog hardware can be used to test all three digital controllers. Only the design-selection and manual-enable inputs need to be changed.
-
-The optional FSM debug outputs may be connected to a logic analyzer during development or left unconnected during normal operation.
+* Analog input source
+* Decoupling capacitors
+* Breadboard or custom PCB
+* Oscilloscope, logic analyzer, or microcontroller
